@@ -1,0 +1,111 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Video {
+  id          String        @id // YouTube video ID
+  title       String
+  thumbnail   String
+  duration    Int
+  channel     String
+  publishedAt DateTime
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  transcripts Transcript[]
+  notes       Notes?
+  chapters    Chapter[]
+  screenshots Screenshot[]
+  flashcards  Flashcard[]
+  quizItems   QuizItem[]
+  chatHistory ChatMessage[]
+}
+
+model Transcript {
+  id             String   @id @default(uuid())
+  videoId        String
+  video          Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  startTime      Float
+  duration       Float
+  originalText   String
+  translatedText String?
+  createdAt      DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model Notes {
+  id              String   @id @default(uuid())
+  videoId         String   @unique
+  video           Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  summaryText     String
+  studyNotesText  String
+  markdownContent String
+  jsonStructure   Json     // Full parsed AI output JSON structure
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Chapter {
+  id          String   @id @default(uuid())
+  videoId     String
+  video       Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  title       String
+  startTime   Float
+  endTime     Float
+  description String
+  createdAt   DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model Screenshot {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  timestamp Float
+  r2Url     String
+  caption   String?
+  createdAt DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model Flashcard {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  question  String
+  answer    String
+  createdAt DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model QuizItem {
+  id            String   @id @default(uuid())
+  videoId       String
+  video         Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  question      String
+  options       Json     // Array of options
+  correctAnswer String
+  createdAt     DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  role      String   // "user" or "assistant"
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([videoId])
+}

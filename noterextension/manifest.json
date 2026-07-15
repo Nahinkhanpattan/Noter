@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Noter Live Widget",
+  "version": "1.0.0",
+  "description": "Floating overlay widget for YouTube. Capture timestamps, frame screenshots, and trigger AI contextual summaries directly inside your notes.",
+  "permissions": [
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://localhost:5000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "action": {
+    "default_title": "Noter Live Widget"
+  }
+}
