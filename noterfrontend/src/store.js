@@ -1,8 +1,8 @@
 const BACKEND_URL = 'http://localhost:5000';
-
 import { create } from 'zustand';
 
 export const useStore = create((set, get) => ({
+  currentView: 'dashboard', // 'dashboard', 'courses', 'course-detail', 'workspace'
   videoId: null,
   video: null,
   notes: null,
@@ -16,15 +16,83 @@ export const useStore = create((set, get) => ({
   searchQuery: '',
   searchResults: { transcripts: [], chapters: [], notes: [], glossary: [] },
 
+  // Course & Navigation state
+  courses: [],
+  activeCourse: null,
+  recentVideos: [],
+
+  setCurrentView: (view) => set({ currentView: view }),
   setVideoId: (id) => set({ videoId: id }),
   setPlaybackTime: (time) => set({ currentTime: time }),
   
   triggerSeek: (seconds) => {
     set({ seekToSeconds: seconds });
-    // Reset after a short delay so consecutive clicks register
     setTimeout(() => {
       set({ seekToSeconds: null });
     }, 100);
+  },
+
+  // Fetch all Course Folders
+  fetchCourses: async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/courses`);
+      if (response.ok) {
+        const { courses } = await response.json();
+        set({ courses: courses || [] });
+      }
+    } catch (err) {
+      console.error('Error fetching courses:', err);
+    }
+  },
+
+  // Create a new Course Playlist Folder
+  createCourseFolder: async (title, description, color) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/courses`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, description, color })
+      });
+      if (response.ok) {
+        await get().fetchCourses();
+        return true;
+      }
+    } catch (err) {
+      console.error('Error creating course folder:', err);
+    }
+    return false;
+  },
+
+  // Fetch specific course details & playlist videos
+  fetchCourseDetail: async (courseId) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/courses/${courseId}`);
+      if (response.ok) {
+        const { course } = await response.json();
+        set({ activeCourse: course, currentView: 'course-detail' });
+      }
+    } catch (err) {
+      console.error('Error fetching course detail:', err);
+    }
+  },
+
+  // Fetch recent videos for home dashboard
+  fetchRecentVideos: async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/videos/recent`);
+      if (response.ok) {
+        const { videos } = await response.json();
+        set({ recentVideos: videos || [] });
+      }
+    } catch (err) {
+      console.error('Error fetching recent videos:', err);
+    }
+  },
+
+  // Open a specific video workspace
+  openVideoWorkspace: async (videoId) => {
+    set({ videoId, currentView: 'workspace' });
+    await get().fetchVideoDetails(videoId);
   },
 
   // Fetch full video details, notes, quizzes, flashcards
@@ -67,13 +135,20 @@ export const useStore = create((set, get) => ({
     }
   },
 
-  // Run isolated AI processing pipeline
-  triggerAIPipeline: async (videoId) => {
+  // Run unified AI processing pipeline
+  triggerAIPipeline: async (videoId, courseId = null) => {
     if (!videoId) return;
     set({ isProcessing: true });
     
     try {
-      // Step 1: Initialize subtitles & translation
+      // Step 0: Ensure Video record is created in DB
+      await fetch(`${BACKEND_URL}/api/video`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${videoId}`, courseId })
+      });
+
+      // Step 1: Subtitles & Translation
       await fetch(`${BACKEND_URL}/api/subtitles`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -86,7 +161,7 @@ export const useStore = create((set, get) => ({
         body: JSON.stringify({ videoId })
       });
 
-      // Step 2: Trigger AI Generation pipeline
+      // Step 2: Unified AI Generation
       const notesRes = await fetch(`${BACKEND_URL}/api/notes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -95,10 +170,12 @@ export const useStore = create((set, get) => ({
 
       if (notesRes.ok) {
         const data = await notesRes.json();
-        set({ notes: data.notes });
-        
-        // Refresh all details to load newly generated chapters, flashcards, quizzes
+        set({ notes: data.notes, currentView: 'workspace' });
         await get().fetchVideoDetails(videoId);
+        await get().fetchRecentVideos();
+      } else {
+        const errData = await notesRes.json();
+        alert(`AI Generation Notice: ${errData.error || 'Failed to process notes'}`);
       }
     } catch (err) {
       console.error('AI Pipeline failed:', err);
@@ -107,12 +184,10 @@ export const useStore = create((set, get) => ({
     }
   },
 
-  // Save notes editor updates to DB
   saveNotesMarkdown: async (markdownContent) => {
     const { videoId } = get();
     if (!videoId) return;
 
-    // Update local state
     set(state => ({
       notes: state.notes ? { ...state.notes, markdownContent } : { id: 'temp', videoId, markdownContent, summaryText: '', studyNotesText: '', jsonStructure: {} }
     }));
@@ -128,12 +203,10 @@ export const useStore = create((set, get) => ({
     }
   },
 
-  // Send a chat message to the video bot
   sendChatMessage: async (message) => {
     const { videoId, chatHistory } = get();
     if (!videoId || !message) return;
 
-    // Optimistically update history
     const userMsg = { id: `user-${Date.now()}`, role: 'user', content: message, createdAt: new Date() };
     set({ chatHistory: [...chatHistory, userMsg] });
 
@@ -154,7 +227,6 @@ export const useStore = create((set, get) => ({
     }
   },
 
-  // Search inside video notes and transcripts
   searchContent: async (query) => {
     const { videoId } = get();
     if (!videoId) return;

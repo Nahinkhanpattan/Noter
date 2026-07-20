@@ -6,6 +6,10 @@ const prisma = new PrismaClient();
  */
 function extractVideoId(url) {
   if (!url) return null;
+  // Handle raw 11-char ID directly
+  if (typeof url === 'string' && url.length === 11 && !url.includes('/') && !url.includes('.')) {
+    return url;
+  }
   const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
   const match = url.match(regex);
   return match ? match[1] : null;
@@ -41,7 +45,6 @@ async function fetchMetadata(videoId) {
       const channel = details.author || 'Unknown Channel';
       const thumbnail = details.thumbnail?.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
       
-      // Try to find publish date
       let publishedAt = new Date();
       try {
         const publishRegex = /"publishDate"\s*:\s*"(.+?)"/;
@@ -49,18 +52,9 @@ async function fetchMetadata(videoId) {
         if (publishMatch) {
           publishedAt = new Date(publishMatch[1]);
         }
-      } catch (e) {
-        // Fallback to now
-      }
+      } catch (e) {}
 
-      return {
-        videoId,
-        title,
-        thumbnail,
-        duration,
-        channel,
-        publishedAt
-      };
+      return { videoId, title, thumbnail, duration, channel, publishedAt };
     }
   } catch (error) {
     console.error('Error scraping YouTube metadata, using fallback details:', error.message);
@@ -78,12 +72,12 @@ async function fetchMetadata(videoId) {
 }
 
 /**
- * Gets or fetches video information and saves to DB.
+ * Gets or fetches video information and saves to DB. Guaranteed to exist in DB upon return.
  */
-async function getOrFetchVideo(url) {
-  const videoId = extractVideoId(url);
+async function getOrFetchVideo(urlOrId) {
+  const videoId = extractVideoId(urlOrId);
   if (!videoId) {
-    throw new Error('Invalid YouTube URL');
+    throw new Error('Invalid YouTube URL or Video ID');
   }
 
   // Check Database
@@ -98,9 +92,11 @@ async function getOrFetchVideo(url) {
   // Fetch metadata
   const metadata = await fetchMetadata(videoId);
 
-  // Save to DB
-  const newVideo = await prisma.video.create({
-    data: {
+  // Upsert to DB to safely handle concurrent requests
+  const video = await prisma.video.upsert({
+    where: { id: metadata.videoId },
+    update: {},
+    create: {
       id: metadata.videoId,
       title: metadata.title,
       thumbnail: metadata.thumbnail,
@@ -110,7 +106,7 @@ async function getOrFetchVideo(url) {
     }
   });
 
-  return newVideo;
+  return video;
 }
 
 module.exports = {

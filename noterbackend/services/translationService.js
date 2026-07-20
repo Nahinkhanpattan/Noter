@@ -6,7 +6,39 @@ const prisma = new PrismaClient();
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 /**
- * Translates raw subtitles using Gemini 2.5 Flash.
+ * Robust call to Gemini API for translation with model fallbacks.
+ */
+async function callGeminiTranslate(contents) {
+  const modelsToTry = ['gemini-flash-latest', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+  let lastError = null;
+
+  for (const modelName of modelsToTry) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: responseSchema
+        }
+      });
+
+      if (response && response.text) {
+        return response.text;
+      }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Translation AI] Attempt with '${modelName}' failed (${err.message.slice(0, 100)}). Retrying...`);
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  throw lastError || new Error("Translation AI failed.");
+}
+
+/**
+ * Translates raw subtitles using Gemini Flash.
  * Stores both original and translated text.
  */
 async function translateSubtitles(videoId) {
@@ -19,44 +51,29 @@ async function translateSubtitles(videoId) {
     throw new Error('No transcripts found to translate.');
   }
 
-  // Segment transcripts into chunks (e.g. 150 items) for reliable AI JSON structure parsing
-  const CHUNK_SIZE = 150;
+  // Segment transcripts into chunks (e.g. 200 items per chunk)
+  const CHUNK_SIZE = 200;
   const chunks = [];
   for (let i = 0; i < dbTranscripts.length; i += CHUNK_SIZE) {
     chunks.push(dbTranscripts.slice(i, i + CHUNK_SIZE));
   }
 
-  console.log(`Translating ${dbTranscripts.length} subtitles in ${chunks.length} chunks...`);
+  console.log(`Translating ${dbTranscripts.length} subtitles in ${chunks.length} chunks using gemini-flash-latest...`);
 
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c];
     
-    // Prepare input JSON for the prompt
     const inputSegments = chunk.map(t => ({
       start: t.startTime,
       text: t.originalText
     }));
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: userPrompt(JSON.stringify(inputSegments)),
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: 'application/json',
-          responseSchema: responseSchema
-        }
-      });
-
-      if (!response.text) {
-        throw new Error('Empty response from translation model');
-      }
-
-      const translatedItems = JSON.parse(response.text);
+      const rawResponse = await callGeminiTranslate(userPrompt(JSON.stringify(inputSegments)));
+      const translatedItems = JSON.parse(rawResponse);
 
       // Save each translated segment back to the DB
       for (const item of translatedItems) {
-        // Find closest database transcript record to avoid floating point issues
         const closestRecord = findClosestRecord(item.start, chunk);
         if (closestRecord) {
           await prisma.transcript.update({
@@ -65,9 +82,14 @@ async function translateSubtitles(videoId) {
           });
         }
       }
+      
+      // Short delay between chunks to respect API rate limits
+      if (chunks.length > 1) {
+        await new Promise(r => setTimeout(r, 1200));
+      }
     } catch (err) {
-      console.error(`Error translating chunk ${c + 1}/${chunks.length}:`, err.message);
-      // Even if AI translation fails on a segment, we fill it with originalText so pipeline doesn't break
+      console.error(`Warning: Chunk ${c + 1}/${chunks.length} translation fallback:`, err.message);
+      // Fallback to original text if translation fails
       for (const t of chunk) {
         await prisma.transcript.update({
           where: { id: t.id },
@@ -99,7 +121,6 @@ function findClosestRecord(startTime, records) {
     }
   }
   
-  // Accept if it's within a 2 second window
   return minDiff < 2.0 ? closest : null;
 }
 

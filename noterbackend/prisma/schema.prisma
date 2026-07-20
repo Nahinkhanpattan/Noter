@@ -7,6 +7,17 @@ generator client {
   provider = "prisma-client-js"
 }
 
+model Course {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  color       String?  @default("violet")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  videos      Video[]
+}
+
 model Video {
   id          String        @id // YouTube video ID
   title       String
@@ -17,6 +28,9 @@ model Video {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  courseId    String?
+  course      Course?       @relation(fields: [courseId], references: [id], onDelete: SetNull)
+
   transcripts Transcript[]
   notes       Notes?
   chapters    Chapter[]
@@ -24,6 +38,8 @@ model Video {
   flashcards  Flashcard[]
   quizItems   QuizItem[]
   chatHistory ChatMessage[]
+
+  @@index([courseId])
 }
 
 model Transcript {

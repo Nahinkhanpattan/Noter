@@ -8,20 +8,18 @@ const { PrismaClient } = require('@prisma/client');
 const { getOrFetchVideo } = require('./services/videoService');
 const { fetchSubtitles, saveRawTranscript } = require('./services/subtitleService');
 const { translateSubtitles } = require('./services/translationService');
-const { 
-  generateChapters, 
-  generateSummary, 
-  generateNotes, 
-  generateGlossary, 
-  generateKeywords, 
-  generateFlashcards, 
-  generateQuiz,
-  chat
-} = require('./services/aiService');
-const { processAndSaveNotes } = require('./services/notesEngine');
+const { generateFullStudyPackage, chat } = require('./services/aiService');
 const { uploadScreenshot } = require('./services/screenshotService');
 const { exportNotes } = require('./services/exportService');
 const { searchVideoContent } = require('./services/searchService');
+const { 
+  getCourses, 
+  getCourseById, 
+  createCourse, 
+  deleteCourse, 
+  addVideoToCourse, 
+  getRecentVideos 
+} = require('./services/courseService');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -31,28 +29,116 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Setup Multer for screenshot image uploads (in-memory buffer storage)
+// Setup Multer for screenshot image uploads
 const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
 // --- API ENDPOINTS ---
 
 /**
+ * GET /api/courses
+ * List all course folders
+ */
+app.get('/api/courses', async (req, res) => {
+  try {
+    const courses = await getCourses();
+    res.json({ courses });
+  } catch (error) {
+    console.error('GET /api/courses error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/courses
+ * Create a new course folder
+ */
+app.post('/api/courses', async (req, res) => {
+  const { title, description, color } = req.body;
+  try {
+    const course = await createCourse(title, description, color);
+    res.json({ success: true, course });
+  } catch (error) {
+    console.error('POST /api/courses error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/courses/:id
+ * Get course playlist & videos
+ */
+app.get('/api/courses/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const course = await getCourseById(id);
+    res.json({ course });
+  } catch (error) {
+    console.error('GET /api/courses/:id error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /api/courses/:id
+ */
+app.delete('/api/courses/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await deleteCourse(id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('DELETE /api/courses/:id error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/courses/:id/add-video
+ */
+app.post('/api/courses/:id/add-video', async (req, res) => {
+  const { id } = req.params;
+  const { videoId } = req.body;
+  try {
+    const video = await addVideoToCourse(id, videoId);
+    res.json({ success: true, video });
+  } catch (error) {
+    console.error('POST /api/courses/:id/add-video error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/videos/recent
+ * Get all analyzed videos for dashboard
+ */
+app.get('/api/videos/recent', async (req, res) => {
+  try {
+    const videos = await getRecentVideos();
+    res.json({ videos });
+  } catch (error) {
+    console.error('GET /api/videos/recent error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/video
- * Input: { url: "https://youtube.com/watch?v=..." }
- * Output: Video object from DB
  */
 app.post('/api/video', async (req, res) => {
-  const { url } = req.body;
+  const { url, courseId } = req.body;
   if (!url) {
     return res.status(400).json({ error: 'Missing youtube video url' });
   }
 
   try {
     const video = await getOrFetchVideo(url);
+    if (courseId) {
+      await addVideoToCourse(courseId, video.id);
+    }
     res.json({ video });
   } catch (error) {
     console.error('POST /api/video error:', error);
@@ -62,7 +148,6 @@ app.post('/api/video', async (req, res) => {
 
 /**
  * GET /api/video/:id
- * Gets metadata of a video
  */
 app.get('/api/video/:id', async (req, res) => {
   const { id } = req.params;
@@ -70,6 +155,7 @@ app.get('/api/video/:id', async (req, res) => {
     const video = await prisma.video.findUnique({
       where: { id },
       include: {
+        course: true,
         chapters: { orderBy: { startTime: 'asc' } },
         screenshots: { orderBy: { timestamp: 'asc' } },
         flashcards: true,
@@ -90,7 +176,6 @@ app.get('/api/video/:id', async (req, res) => {
 
 /**
  * POST /api/subtitles
- * Fetches subtitles and saves to DB. Returns raw text structure.
  */
 app.post('/api/subtitles', async (req, res) => {
   const { videoId } = req.body;
@@ -99,6 +184,7 @@ app.post('/api/subtitles', async (req, res) => {
   }
 
   try {
+    await getOrFetchVideo(videoId);
     const subtitles = await fetchSubtitles(videoId);
     const saved = await saveRawTranscript(videoId, subtitles);
     res.json({ success: true, count: saved.length, subtitles });
@@ -114,7 +200,6 @@ app.post('/api/subtitles', async (req, res) => {
 
 /**
  * POST /api/translate
- * Translates raw subtitles using Gemini Flash and saves back.
  */
 app.post('/api/translate', async (req, res) => {
   const { videoId } = req.body;
@@ -123,6 +208,7 @@ app.post('/api/translate', async (req, res) => {
   }
 
   try {
+    await getOrFetchVideo(videoId);
     const translated = await translateSubtitles(videoId);
     res.json({ success: true, count: translated.length, translated });
   } catch (error) {
@@ -133,7 +219,6 @@ app.post('/api/translate', async (req, res) => {
 
 /**
  * POST /api/notes
- * Coordinates isolated AI processes and saves to DB via NotesEngine.
  */
 app.post('/api/notes', async (req, res) => {
   const { videoId } = req.body;
@@ -143,41 +228,17 @@ app.post('/api/notes', async (req, res) => {
 
   try {
     console.log(`Starting AI Processing Pipeline for video: ${videoId}`);
+    await getOrFetchVideo(videoId);
     
-    // Run isolated requests in sequence (safe database updates per phase)
-    console.log('- Generating chapters...');
-    const chapters = await generateChapters(videoId);
-    
-    console.log('- Generating summary...');
-    const summary = await generateSummary(videoId);
-    
-    console.log('- Generating concept notes...');
-    const notes = await generateNotes(videoId);
-    
-    console.log('- Generating glossary...');
-    const glossary = await generateGlossary(videoId);
-    
-    console.log('- Generating keywords...');
-    const keywords = await generateKeywords(videoId);
-
-    console.log('- Generating study items (quizzes & flashcards)...');
-    await generateFlashcards(videoId);
-    await generateQuiz(videoId);
-
-    // Validate with Zod and compile outputs
-    console.log('- Saving and compiling Markdown/HTML blocks...');
-    const result = await processAndSaveNotes(videoId, {
-      summary,
-      chapters,
-      notes,
-      glossary,
-      keywords
-    });
+    const result = await generateFullStudyPackage(videoId);
 
     res.json({
       success: true,
       notes: result.notes,
-      html: result.html
+      html: result.html,
+      chapters: result.chapters,
+      flashcards: result.flashcards,
+      quiz: result.quiz
     });
   } catch (error) {
     console.error('POST /api/notes pipeline error:', error);
@@ -187,7 +248,6 @@ app.post('/api/notes', async (req, res) => {
 
 /**
  * GET /api/notes/:videoId
- * Retrieve generated notes for a video
  */
 app.get('/api/notes/:videoId', async (req, res) => {
   const { videoId } = req.params;
@@ -209,7 +269,6 @@ app.get('/api/notes/:videoId', async (req, res) => {
 
 /**
  * POST /api/chat
- * Send a message to Gemini chatbot configured with the video context
  */
 app.post('/api/chat', async (req, res) => {
   const { videoId, history, message } = req.body;
@@ -228,7 +287,6 @@ app.post('/api/chat', async (req, res) => {
 
 /**
  * GET /api/chat/history/:videoId
- * Retrieve chatbot history for a video
  */
 app.get('/api/chat/history/:videoId', async (req, res) => {
   const { videoId } = req.params;
@@ -246,7 +304,6 @@ app.get('/api/chat/history/:videoId', async (req, res) => {
 
 /**
  * POST /api/screenshot
- * Receives manual screenshots uploaded from the Chrome extension, uploads to R2 and returns S3 URL
  */
 app.post('/api/screenshot', upload.single('screenshot'), async (req, res) => {
   const { videoId, timestamp } = req.body;
@@ -269,7 +326,6 @@ app.post('/api/screenshot', upload.single('screenshot'), async (req, res) => {
 
 /**
  * GET /api/search
- * Search across transcripts, notes, and glossary for matching concepts
  */
 app.get('/api/search', async (req, res) => {
   const { videoId, q } = req.query;
@@ -288,7 +344,6 @@ app.get('/api/search', async (req, res) => {
 
 /**
  * POST /api/export
- * Download compiled Markdown/HTML documents
  */
 app.post('/api/export', async (req, res) => {
   const { videoId, format } = req.body;
@@ -309,7 +364,6 @@ app.post('/api/export', async (req, res) => {
 
 /**
  * POST /api/notes/save
- * Saves markdown content updated by editor (client or extension)
  */
 app.post('/api/notes/save', async (req, res) => {
   const { videoId, markdownContent } = req.body;
@@ -318,6 +372,7 @@ app.post('/api/notes/save', async (req, res) => {
   }
 
   try {
+    await getOrFetchVideo(videoId);
     const notes = await prisma.notes.upsert({
       where: { videoId },
       update: { markdownContent },
@@ -332,50 +387,6 @@ app.post('/api/notes/save', async (req, res) => {
     res.json({ success: true, notes });
   } catch (error) {
     console.error('POST /api/notes/save error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * POST /api/notes/ai-quick
- * Generates a 60-second transcript summary at the current video timestamp
- */
-app.post('/api/notes/ai-quick', async (req, res) => {
-  const { videoId, currentTime } = req.body;
-  if (!videoId || currentTime === undefined) {
-    return res.status(400).json({ error: 'Missing videoId or currentTime' });
-  }
-
-  try {
-    const time = parseFloat(currentTime);
-    const transcripts = await prisma.transcript.findMany({
-      where: {
-        videoId,
-        startTime: {
-          gte: Math.max(0, time - 60),
-          lte: time
-        }
-      },
-      orderBy: { startTime: 'asc' }
-    });
-
-    if (transcripts.length === 0) {
-      return res.json({ summary: "No transcript segments found in the last 60 seconds." });
-    }
-
-    const textContext = transcripts.map(t => t.translatedText || t.originalText).join(' ');
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: `Analyze the following 60-second video segment transcript and generate a very concise summary, insight, key takeaway, or formula mentioned. Keep it to a maximum of 2 sentences.
-      
-      Transcript segment:
-      "${textContext}"`,
-    });
-
-    res.json({ summary: response.text.trim() });
-  } catch (error) {
-    console.error('POST /api/notes/ai-quick error:', error);
     res.status(500).json({ error: error.message });
   }
 });
